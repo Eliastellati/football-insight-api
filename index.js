@@ -72,6 +72,32 @@ app.get("/api/competitions/top", async (_req, res) => {
   }
 });
 
+app.get("/api/competitions/:code/standings", async (req, res) => {
+  try {
+    const code = String(req.params.code || "").toUpperCase();
+
+    // basic validation
+    const allowed = ["PL", "PD", "SA", "BL1", "FL1", "CL"];
+    if (!allowed.includes(code)) {
+      return res.status(400).json({ error: "Unsupported competition code" });
+    }
+
+    const cacheKey = `fd:v4:standings:${code}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json({ source: "cache", data: cached });
+
+    const data = await fdGet(`/competitions/${code}/standings`);
+
+    // cache 30 minutes
+    await cacheSet(cacheKey, data, 30 * 60);
+
+    res.json({ source: "live", data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load standings" });
+  }
+});
+
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on port ${port}`));
