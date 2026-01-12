@@ -1,16 +1,21 @@
-import { cacheGet, cacheSet } from "./cache.js";
-import { fdGet } from "./footballData.js";
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import dotenv from "dotenv";
 
-
-
-dotenv.config();
+import { cacheGet, cacheSet } from "./cache.js";
+import { fdGet } from "./footballData.js";
+import { TOP_COMPETITIONS } from "./config.js";
+import { pool } from "./db.js";
 
 const app = express();
+
+// Fix Railway + express-rate-limit
 app.set("trust proxy", 1);
+
+// Middlewares
 app.use(express.json());
 // per ora lasciamo "*" (aperto). Dopo lo restringiamo a Vercel.
 app.use(cors({ origin: "*" }));
@@ -24,7 +29,78 @@ app.use(
   })
 );
 
+// Health
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+/* =========================
+   ADMIN (schema mapping)
+   ========================= */
+
+function requireAdmin(req, res, next) {
+  const token = process.env.ADMIN_TOKEN;
+  if (!token) {
+    return res.status(500).json({ ok: false, error: "ADMIN_TOKEN not set" });
+  }
+
+  const got = req.get("x-admin-token");
+  if (got !== token) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  next();
+}
+
+// Schema mapping: api_cache1 (columns + indexes + constraints)
+app.get("/api/admin/describe/api_cache1", requireAdmin, async (_req, res) => {
+  try {
+    const columns = await pool.query(`
+      SELECT
+        ordinal_position,
+        column_name,
+        data_type,
+        udt_name,
+        is_nullable,
+        column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'api_cache1'
+      ORDER BY ordinal_position;
+    `);
+
+    const indexes = await pool.query(`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'api_cache1'
+      ORDER BY indexname;
+    `);
+
+    const constraints = await pool.query(`
+      SELECT
+        conname AS constraint_name,
+        contype AS constraint_type,
+        pg_get_constraintdef(c.oid) AS definition
+      FROM pg_constraint c
+      WHERE c.conrelid = 'public.api_cache1'::regclass
+      ORDER BY contype, conname;
+    `);
+
+    res.json({
+      ok: true,
+      table: "public.api_cache1",
+      columns: columns.rows,
+      indexes: indexes.rows,
+      constraints: constraints.rows,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+/* =========================
+   API endpoints
+   ========================= */
 
 app.get("/api/competitions", async (_req, res) => {
   try {
@@ -43,15 +119,21 @@ app.get("/api/competitions", async (_req, res) => {
     res.status(500).json({ error: "Failed to load competitions" });
   }
 });
-import { TOP_COMPETITIONS } from "./config.js";
 
 app.get("/api/competitions/top", async (_req, res) => {
   try {
     const cacheKey = "fd:v4:competitions";
-    const cached = await cacheGet(cacheKey);
-    const data = cached ?? (await fdGet("/competitions"));
+    let cached = await cacheGet(cacheKey);
 
-    // Filter only curated codes
+    let data;
+    if (cached) {
+      data = cached;
+    } else {
+      data = await fdGet("/competitions");
+      // cache 24h anche qui, così top è sempre veloce
+      await cacheSet(cacheKey, data, 24 * 60 * 60);
+    }
+
     const filtered = (data.competitions ?? []).filter((c) =>
       TOP_COMPETITIONS.includes(c.code)
     );
@@ -76,7 +158,6 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
   try {
     const code = String(req.params.code || "").toUpperCase();
 
-    // basic validation
     const allowed = ["PL", "PD", "SA", "BL1", "FL1", "CL"];
     if (!allowed.includes(code)) {
       return res.status(400).json({ error: "Unsupported competition code" });
@@ -98,15 +179,18 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
   }
 });
 
+/* =========================
+   DEBUG endpoints (temporanei)
+   ========================= */
+
 app.get("/api/cache-check", async (_req, res) => {
   try {
     const key = "fd:v4:standings:SA";
     const cached = await cacheGet(key);
-    const found = Boolean(cached);
-    res.json({ key, found });
+    res.json({ key, found: Boolean(cached) });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: String(err.message || err) });
+    res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
@@ -117,7 +201,7 @@ app.get("/api/db-test-write", async (_req, res) => {
     res.json({ ok: true, wrote: key });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ ok: false, error: String(err.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
@@ -128,11 +212,9 @@ app.get("/api/db-test-read", async (_req, res) => {
     res.json({ ok: true, key, value: cached });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ ok: false, error: String(err.message || err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
-
-import { pool } from "./db.js";
 
 app.get("/api/db-inspect", async (_req, res) => {
   try {
@@ -148,10 +230,10 @@ app.get("/api/db-inspect", async (_req, res) => {
     res.json({ found: rows.length > 0, row: rows[0] ?? null });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: String(err.message || err) });
+    res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
-
+// Start server
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on port ${port}`));
