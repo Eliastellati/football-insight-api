@@ -274,6 +274,119 @@ if (DEBUG_ENABLED) {
     }
   });
 }
+// -------------------- MATCHES (fixtures) --------------------
+// GET /api/competitions/:code/matches?from=YYYY-MM-DD&to=YYYY-MM-DD&status=...&limit=...
+app.get("/api/competitions/:code/matches", async (req, res) => {
+  try {
+    const code = String(req.params.code || "").toUpperCase();
+
+    // keep it consistent with standings
+    const allowed = ["PL", "PD", "SA", "BL1", "FL1", "CL"];
+    if (!allowed.includes(code)) {
+      return res.status(400).json({ error: "Unsupported competition code" });
+    }
+
+    const isISODate = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+    const from = isISODate(req.query.from) ? req.query.from : (isISODate(req.query.dateFrom) ? req.query.dateFrom : null);
+    const to = isISODate(req.query.to) ? req.query.to : (isISODate(req.query.dateTo) ? req.query.dateTo : null);
+
+    const statusRaw = typeof req.query.status === "string" ? req.query.status : null;
+    const status = statusRaw ? statusRaw.toUpperCase().replace(/[^A-Z_,]/g, "") : null;
+
+    const limitRaw = typeof req.query.limit === "string" ? req.query.limit : null;
+    const limit = limitRaw && /^\d+$/.test(limitRaw) ? Math.min(parseInt(limitRaw, 10), 200) : null;
+
+    const qs = new URLSearchParams();
+    if (from) qs.set("dateFrom", from);
+    if (to) qs.set("dateTo", to);
+    if (status) qs.set("status", status);
+    if (limit) qs.set("limit", String(limit));
+
+    const qsString = qs.toString();
+    const path = `/competitions/${code}/matches${qsString ? `?${qsString}` : ""}`;
+
+    const cacheKey = `fd:v4:matches:${code}:${from || ""}:${to || ""}:${status || ""}:${limit || ""}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json({ source: "cache", data: cached });
+
+    const data = await fdGet(path);
+
+    // cache 10 minutes
+    await cacheSet(cacheKey, data, 10 * 60);
+
+    res.json({ source: "live", data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load matches" });
+  }
+});
+
+// -------------------- TEAM --------------------
+// GET /api/teams/:id
+app.get("/api/teams/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!/^\d+$/.test(id)) return res.status(400).json({ error: "Invalid team id" });
+
+    const cacheKey = `fd:v4:team:${id}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json({ source: "cache", data: cached });
+
+    const data = await fdGet(`/teams/${id}`);
+
+    // team info changes rarely
+    await cacheSet(cacheKey, data, 24 * 60 * 60);
+
+    res.json({ source: "live", data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load team" });
+  }
+});
+
+// GET /api/teams/:id/matches?status=FINISHED&limit=5&from=YYYY-MM-DD&to=YYYY-MM-DD
+app.get("/api/teams/:id/matches", async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!/^\d+$/.test(id)) return res.status(400).json({ error: "Invalid team id" });
+
+    const isISODate = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+    const from = isISODate(req.query.from) ? req.query.from : (isISODate(req.query.dateFrom) ? req.query.dateFrom : null);
+    const to = isISODate(req.query.to) ? req.query.to : (isISODate(req.query.dateTo) ? req.query.dateTo : null);
+
+    const statusRaw = typeof req.query.status === "string" ? req.query.status : null;
+    const status = statusRaw ? statusRaw.toUpperCase().replace(/[^A-Z_,]/g, "") : null;
+
+    const limitRaw = typeof req.query.limit === "string" ? req.query.limit : null;
+    const limit = limitRaw && /^\d+$/.test(limitRaw) ? Math.min(parseInt(limitRaw, 10), 100) : 10;
+
+    const qs = new URLSearchParams();
+    if (from) qs.set("dateFrom", from);
+    if (to) qs.set("dateTo", to);
+    if (status) qs.set("status", status);
+    if (limit) qs.set("limit", String(limit));
+
+    const qsString = qs.toString();
+    const path = `/teams/${id}/matches${qsString ? `?${qsString}` : ""}`;
+
+    const cacheKey = `fd:v4:team-matches:${id}:${from || ""}:${to || ""}:${status || ""}:${limit || ""}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json({ source: "cache", data: cached });
+
+    const data = await fdGet(path);
+
+    // cache 10 minutes
+    await cacheSet(cacheKey, data, 10 * 60);
+
+    res.json({ source: "live", data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load team matches" });
+  }
+});
+
 
 /* =========================
    Start server
