@@ -43,6 +43,34 @@ app.get("/api/competitions", async (_req, res) => {
     res.status(500).json({ error: "Failed to load competitions" });
   }
 });
+import { TOP_COMPETITIONS } from "./config.js";
+
+app.get("/api/competitions/top", async (_req, res) => {
+  try {
+    const cacheKey = "fd:v4:competitions";
+    const cached = await cacheGet(cacheKey);
+    const data = cached ?? (await fdGet("/competitions"));
+
+    // Filter only curated codes
+    const filtered = (data.competitions ?? []).filter((c) =>
+      TOP_COMPETITIONS.includes(c.code)
+    );
+
+    res.json({
+      source: cached ? "cache" : "live",
+      competitions: filtered.map((c) => ({
+        id: c.id,
+        code: c.code,
+        name: c.name,
+        area: c.area?.name ?? null,
+        emblem: c.emblem ?? null,
+      })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load top competitions" });
+  }
+});
 
 
 const port = process.env.PORT || 3000;
