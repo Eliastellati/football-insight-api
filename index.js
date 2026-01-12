@@ -98,6 +98,18 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
   }
 });
 
+app.get("/api/cache-check", async (_req, res) => {
+  try {
+    const key = "fd:v4:standings:SA";
+    const cached = await cacheGet(key);
+    const found = Boolean(cached);
+    res.json({ key, found });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on port ${port}`));
