@@ -110,6 +110,28 @@ app.get("/api/cache-check", async (_req, res) => {
   }
 });
 
+app.get("/api/db-test-write", async (_req, res) => {
+  try {
+    const key = "test:key";
+    await cacheSet(key, { hello: "world", t: Date.now() }, 60 * 60);
+    res.json({ ok: true, wrote: key });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+app.get("/api/db-test-read", async (_req, res) => {
+  try {
+    const key = "test:key";
+    const cached = await cacheGet(key);
+    res.json({ ok: true, key, value: cached });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on port ${port}`));
