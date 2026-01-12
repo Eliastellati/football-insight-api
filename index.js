@@ -98,6 +98,48 @@ app.get("/api/admin/describe/api_cache1", requireAdmin, async (_req, res) => {
   }
 });
 
+app.post("/api/admin/migrate/api_cache1-timestamps", requireAdmin, async (req, res) => {
+  try {
+    // Leggi tipi attuali
+    const before = await pool.query(`
+      SELECT column_name, data_type, udt_name, column_default
+      FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='api_cache1'
+      ORDER BY ordinal_position;
+    `);
+
+    // Migra DATE -> TIMESTAMPTZ
+    await pool.query(`
+      ALTER TABLE public.api_cache1
+        ALTER COLUMN expires_at TYPE timestamptz USING expires_at::timestamptz,
+        ALTER COLUMN created_at TYPE timestamptz USING created_at::timestamptz;
+    `);
+
+    // Default sensato (created_at = now)
+    await pool.query(`
+      ALTER TABLE public.api_cache1
+        ALTER COLUMN created_at SET DEFAULT NOW();
+    `);
+
+    // (Consigliato) svuota la cache vecchia, perché era “invalidata” dal bug
+    // Puoi disattivarlo se vuoi: commenta questa riga.
+    await pool.query(`TRUNCATE TABLE public.api_cache1;`);
+
+    // Output dopo
+    const after = await pool.query(`
+      SELECT column_name, data_type, udt_name, column_default
+      FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='api_cache1'
+      ORDER BY ordinal_position;
+    `);
+
+    res.json({ ok: true, before: before.rows, after: after.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 /* =========================
    API endpoints
    ========================= */
