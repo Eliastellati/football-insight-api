@@ -10,8 +10,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(express.json());
-
 // per ora lasciamo "*" (aperto). Dopo lo restringiamo a Vercel.
 app.use(cors({ origin: "*" }));
 
