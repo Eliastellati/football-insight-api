@@ -132,6 +132,26 @@ app.get("/api/db-test-read", async (_req, res) => {
   }
 });
 
+import { pool } from "./db.js";
+
+app.get("/api/db-inspect", async (_req, res) => {
+  try {
+    const key = "test:key";
+    const { rows } = await pool.query(
+      `SELECT cache_key, payload_json, expires_at, created_at, NOW() as now
+       FROM api_cache1
+       WHERE cache_key = $1
+       LIMIT 1`,
+      [key]
+    );
+
+    res.json({ found: rows.length > 0, row: rows[0] ?? null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on port ${port}`));
