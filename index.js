@@ -12,7 +12,7 @@ import { pool } from "./db.js";
 
 const app = express();
 
-// Fix Railway + express-rate-limit
+// Fix Railway + express-rate-limit (x-forwarded-for)
 app.set("trust proxy", 1);
 
 // Middlewares
@@ -29,26 +29,28 @@ app.use(
   })
 );
 
-// Health
+/* =========================
+   Health
+   ========================= */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* =========================
-   ADMIN (schema mapping)
+   Admin (protetto da token)
    ========================= */
-
 function requireAdmin(req, res, next) {
   const token = process.env.ADMIN_TOKEN;
-  if (!token) {
-    return res.status(500).json({ ok: false, error: "ADMIN_TOKEN not set" });
-  }
+  if (!token) return res.status(500).json({ ok: false, error: "ADMIN_TOKEN not set" });
 
   const got = req.get("x-admin-token");
-  if (got !== token) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
-  }
+  if (got !== token) return res.status(401).json({ ok: false, error: "Unauthorized" });
 
   next();
 }
+
+// Ping admin (utile per debug deploy)
+app.get("/api/admin/ping", requireAdmin, (_req, res) => {
+  res.json({ ok: true, admin: true });
+});
 
 // Schema mapping: api_cache1 (columns + indexes + constraints)
 app.get("/api/admin/describe/api_cache1", requireAdmin, async (_req, res) => {
@@ -98,9 +100,10 @@ app.get("/api/admin/describe/api_cache1", requireAdmin, async (_req, res) => {
   }
 });
 
+// Migrazione DATE -> TIMESTAMPTZ (sicura: niente TRUNCATE di default)
+// Se vuoi svuotare cache: passa ?truncate=1
 app.post("/api/admin/migrate/api_cache1-timestamps", requireAdmin, async (req, res) => {
   try {
-    // Leggi tipi attuali
     const before = await pool.query(`
       SELECT column_name, data_type, udt_name, column_default
       FROM information_schema.columns
@@ -108,24 +111,22 @@ app.post("/api/admin/migrate/api_cache1-timestamps", requireAdmin, async (req, r
       ORDER BY ordinal_position;
     `);
 
-    // Migra DATE -> TIMESTAMPTZ
     await pool.query(`
       ALTER TABLE public.api_cache1
         ALTER COLUMN expires_at TYPE timestamptz USING expires_at::timestamptz,
         ALTER COLUMN created_at TYPE timestamptz USING created_at::timestamptz;
     `);
 
-    // Default sensato (created_at = now)
     await pool.query(`
       ALTER TABLE public.api_cache1
         ALTER COLUMN created_at SET DEFAULT NOW();
     `);
 
-    // (Consigliato) svuota la cache vecchia, perché era “invalidata” dal bug
-    // Puoi disattivarlo se vuoi: commenta questa riga.
-    await pool.query(`TRUNCATE TABLE public.api_cache1;`);
+    const truncate = String(req.query.truncate || "") === "1";
+    if (truncate) {
+      await pool.query(`TRUNCATE TABLE public.api_cache1;`);
+    }
 
-    // Output dopo
     const after = await pool.query(`
       SELECT column_name, data_type, udt_name, column_default
       FROM information_schema.columns
@@ -133,7 +134,7 @@ app.post("/api/admin/migrate/api_cache1-timestamps", requireAdmin, async (req, r
       ORDER BY ordinal_position;
     `);
 
-    res.json({ ok: true, before: before.rows, after: after.rows });
+    res.json({ ok: true, truncated: truncate, before: before.rows, after: after.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -144,6 +145,7 @@ app.post("/api/admin/migrate/api_cache1-timestamps", requireAdmin, async (req, r
    API endpoints
    ========================= */
 
+// competitions (cached 24h)
 app.get("/api/competitions", async (_req, res) => {
   try {
     const cacheKey = "fd:v4:competitions";
@@ -152,9 +154,7 @@ app.get("/api/competitions", async (_req, res) => {
 
     const data = await fdGet("/competitions");
 
-    // cache 24h
     await cacheSet(cacheKey, data, 24 * 60 * 60);
-
     res.json({ source: "live", data });
   } catch (err) {
     console.error(err);
@@ -162,19 +162,16 @@ app.get("/api/competitions", async (_req, res) => {
   }
 });
 
+// top competitions (curated list)
 app.get("/api/competitions/top", async (_req, res) => {
   try {
     const cacheKey = "fd:v4:competitions";
-    let cached = await cacheGet(cacheKey);
+    const cached = await cacheGet(cacheKey);
 
-    let data;
-    if (cached) {
-      data = cached;
-    } else {
-      data = await fdGet("/competitions");
-      // cache 24h anche qui, così top è sempre veloce
-      await cacheSet(cacheKey, data, 24 * 60 * 60);
-    }
+    const data = cached ?? (await fdGet("/competitions"));
+
+    // se era live e vuoi anche cache qui:
+    if (!cached) await cacheSet(cacheKey, data, 24 * 60 * 60);
 
     const filtered = (data.competitions ?? []).filter((c) =>
       TOP_COMPETITIONS.includes(c.code)
@@ -196,6 +193,7 @@ app.get("/api/competitions/top", async (_req, res) => {
   }
 });
 
+// standings (cached 30 min)
 app.get("/api/competitions/:code/standings", async (req, res) => {
   try {
     const code = String(req.params.code || "").toUpperCase();
@@ -211,9 +209,7 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
 
     const data = await fdGet(`/competitions/${code}/standings`);
 
-    // cache 30 minutes
     await cacheSet(cacheKey, data, 30 * 60);
-
     res.json({ source: "live", data });
   } catch (err) {
     console.error(err);
@@ -222,7 +218,7 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
 });
 
 /* =========================
-   DEBUG endpoints (temporanei)
+   Debug endpoints (temporanei)
    ========================= */
 
 app.get("/api/cache-check", async (_req, res) => {
@@ -276,6 +272,8 @@ app.get("/api/db-inspect", async (_req, res) => {
   }
 });
 
-// Start server
+/* =========================
+   Start server
+   ========================= */
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on port ${port}`));
