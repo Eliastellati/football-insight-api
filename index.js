@@ -30,12 +30,7 @@ app.use(
 );
 
 /* =========================
-   Health
-   ========================= */
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-/* =========================
-   Admin (protetto da token)
+   Helpers
    ========================= */
 function requireAdmin(req, res, next) {
   const token = process.env.ADMIN_TOKEN;
@@ -47,9 +42,18 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// Ping admin (utile per debug deploy)
+const DEBUG_ENABLED = String(process.env.DEBUG_ENDPOINTS || "").toLowerCase() === "true";
+
+/* =========================
+   Health
+   ========================= */
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+/* =========================
+   Admin (protetto da token)
+   ========================= */
 app.get("/api/admin/ping", requireAdmin, (_req, res) => {
-  res.json({ ok: true, admin: true });
+  res.json({ ok: true, admin: true, debugEndpoints: DEBUG_ENABLED });
 });
 
 // Schema mapping: api_cache1 (columns + indexes + constraints)
@@ -100,8 +104,7 @@ app.get("/api/admin/describe/api_cache1", requireAdmin, async (_req, res) => {
   }
 });
 
-// Migrazione DATE -> TIMESTAMPTZ (sicura: niente TRUNCATE di default)
-// Se vuoi svuotare cache: passa ?truncate=1
+// Migrazione DATE -> TIMESTAMPTZ (lascia pure, è admin-only)
 app.post("/api/admin/migrate/api_cache1-timestamps", requireAdmin, async (req, res) => {
   try {
     const before = await pool.query(`
@@ -153,8 +156,8 @@ app.get("/api/competitions", async (_req, res) => {
     if (cached) return res.json({ source: "cache", data: cached });
 
     const data = await fdGet("/competitions");
-
     await cacheSet(cacheKey, data, 24 * 60 * 60);
+
     res.json({ source: "live", data });
   } catch (err) {
     console.error(err);
@@ -169,8 +172,6 @@ app.get("/api/competitions/top", async (_req, res) => {
     const cached = await cacheGet(cacheKey);
 
     const data = cached ?? (await fdGet("/competitions"));
-
-    // se era live e vuoi anche cache qui:
     if (!cached) await cacheSet(cacheKey, data, 24 * 60 * 60);
 
     const filtered = (data.competitions ?? []).filter((c) =>
@@ -208,8 +209,8 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
     if (cached) return res.json({ source: "cache", data: cached });
 
     const data = await fdGet(`/competitions/${code}/standings`);
-
     await cacheSet(cacheKey, data, 30 * 60);
+
     res.json({ source: "live", data });
   } catch (err) {
     console.error(err);
@@ -218,59 +219,61 @@ app.get("/api/competitions/:code/standings", async (req, res) => {
 });
 
 /* =========================
-   Debug endpoints (temporanei)
+   Debug endpoints (solo se DEBUG_ENDPOINTS=true)
+   + sempre protetti da ADMIN_TOKEN
    ========================= */
+if (DEBUG_ENABLED) {
+  app.get("/api/cache-check", requireAdmin, async (_req, res) => {
+    try {
+      const key = "fd:v4:standings:SA";
+      const cached = await cacheGet(key);
+      res.json({ key, found: Boolean(cached) });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
 
-app.get("/api/cache-check", async (_req, res) => {
-  try {
-    const key = "fd:v4:standings:SA";
-    const cached = await cacheGet(key);
-    res.json({ key, found: Boolean(cached) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err?.message || err) });
-  }
-});
+  app.get("/api/db-test-write", requireAdmin, async (_req, res) => {
+    try {
+      const key = "test:key";
+      await cacheSet(key, { hello: "world", t: Date.now() }, 60 * 60);
+      res.json({ ok: true, wrote: key });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
 
-app.get("/api/db-test-write", async (_req, res) => {
-  try {
-    const key = "test:key";
-    await cacheSet(key, { hello: "world", t: Date.now() }, 60 * 60);
-    res.json({ ok: true, wrote: key });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
+  app.get("/api/db-test-read", requireAdmin, async (_req, res) => {
+    try {
+      const key = "test:key";
+      const cached = await cacheGet(key);
+      res.json({ ok: true, key, value: cached });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
 
-app.get("/api/db-test-read", async (_req, res) => {
-  try {
-    const key = "test:key";
-    const cached = await cacheGet(key);
-    res.json({ ok: true, key, value: cached });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
+  app.get("/api/db-inspect", requireAdmin, async (_req, res) => {
+    try {
+      const key = "test:key";
+      const { rows } = await pool.query(
+        `SELECT cache_key, payload_json, expires_at, created_at, NOW() as now
+         FROM api_cache1
+         WHERE cache_key = $1
+         LIMIT 1`,
+        [key]
+      );
 
-app.get("/api/db-inspect", async (_req, res) => {
-  try {
-    const key = "test:key";
-    const { rows } = await pool.query(
-      `SELECT cache_key, payload_json, expires_at, created_at, NOW() as now
-       FROM api_cache1
-       WHERE cache_key = $1
-       LIMIT 1`,
-      [key]
-    );
-
-    res.json({ found: rows.length > 0, row: rows[0] ?? null });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err?.message || err) });
-  }
-});
+      res.json({ found: rows.length > 0, row: rows[0] ?? null });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+}
 
 /* =========================
    Start server
